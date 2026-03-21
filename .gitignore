@@ -1,0 +1,19 @@
+# Rust
+src-tauri/target/
+
+# Build output
+dist/
+
+# Generated schemas
+src-tauri/gen/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
