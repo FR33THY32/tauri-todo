@@ -307,6 +307,17 @@ html, body {
 }
 .drag-handle:active { cursor: grabbing; }
 .item:hover .drag-handle { opacity: 1; }
+
+/* Drag ghost (floating clone) */
+.drag-ghost {
+  opacity: 0.85;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+  border-color: var(--text-1) !important;
+  transform: scale(1.02);
+  transition: none;
+  animation: none;
+}
+.drag-ghost .acts, .drag-ghost .drag-handle { opacity: 0 !important; }
 .item-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
 
 /* Checkbox */

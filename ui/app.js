@@ -268,7 +268,7 @@ function render(anim) {
     const focused = kbMode && kbIndex === idx;
 
     return `
-    <li class="item${t.completed ? ' done' : ''}${isOpen ? ' open' : ''}${focused ? ' kb-focus' : ''}" data-id="${t.id}" data-idx="${idx}" draggable="true">
+    <li class="item${t.completed ? ' done' : ''}${isOpen ? ' open' : ''}${focused ? ' kb-focus' : ''}" data-id="${t.id}" data-idx="${idx}">
       <div class="item-row">
         <div class="drag-handle" title="Drag to reorder">
           <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
@@ -362,26 +362,117 @@ function bindItems() {
     }
 
     const handle = el.querySelector('.drag-handle');
-    handle.addEventListener('mousedown', () => el.setAttribute('data-can-drag', '1'));
-    el.addEventListener('dragstart', (e) => {
-      if (!el.getAttribute('data-can-drag')) { e.preventDefault(); return; }
-      el.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', id);
-    });
-    el.addEventListener('dragend', () => {
-      el.classList.remove('dragging');
-      el.removeAttribute('data-can-drag');
-      listEl.querySelectorAll('.item').forEach(i => i.classList.remove('drag-over'));
-    });
-    el.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; el.classList.add('drag-over'); });
-    el.addEventListener('dragleave', () => el.classList.remove('drag-over'));
-    el.addEventListener('drop', (e) => {
-      e.preventDefault(); el.classList.remove('drag-over');
-      const fromId = e.dataTransfer.getData('text/plain');
-      if (fromId && fromId !== id) reorder(fromId, id);
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      startDrag(el, id, e);
     });
   });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Pointer-based Drag & Drop
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+let dragState = null;
+
+function startDrag(el, id, e) {
+  const rect = el.getBoundingClientRect();
+  const scrollContainer = document.getElementById('scroll');
+
+  // Create ghost clone
+  const ghost = el.cloneNode(true);
+  ghost.classList.add('drag-ghost');
+  ghost.style.width = rect.width + 'px';
+  ghost.style.position = 'fixed';
+  ghost.style.zIndex = '100';
+  ghost.style.pointerEvents = 'none';
+  ghost.style.left = rect.left + 'px';
+  ghost.style.top = rect.top + 'px';
+  document.body.appendChild(ghost);
+
+  el.classList.add('dragging');
+
+  dragState = {
+    id,
+    el,
+    ghost,
+    offsetY: e.clientY - rect.top,
+    startY: e.clientY,
+    scrollContainer,
+  };
+
+  document.addEventListener('mousemove', onDragMove);
+  document.addEventListener('mouseup', onDragEnd);
+}
+
+function onDragMove(e) {
+  if (!dragState) return;
+  const { ghost, offsetY, scrollContainer } = dragState;
+
+  // Move ghost
+  ghost.style.top = (e.clientY - offsetY) + 'px';
+
+  // Find drop target
+  const items = listEl.querySelectorAll('.item:not(.dragging)');
+  let closest = null;
+  let closestDist = Infinity;
+
+  items.forEach(item => {
+    const rect = item.getBoundingClientRect();
+    const mid = rect.top + rect.height / 2;
+    const dist = Math.abs(e.clientY - mid);
+    if (dist < closestDist) {
+      closestDist = dist;
+      closest = item;
+    }
+    item.classList.remove('drag-over');
+  });
+
+  if (closest) closest.classList.add('drag-over');
+
+  // Auto-scroll when near edges
+  const sr = scrollContainer.getBoundingClientRect();
+  const edge = 40;
+  if (e.clientY < sr.top + edge) {
+    scrollContainer.scrollTop -= 6;
+  } else if (e.clientY > sr.bottom - edge) {
+    scrollContainer.scrollTop += 6;
+  }
+}
+
+function onDragEnd(e) {
+  if (!dragState) return;
+  document.removeEventListener('mousemove', onDragMove);
+  document.removeEventListener('mouseup', onDragEnd);
+
+  const { id, el, ghost } = dragState;
+
+  // Find drop target
+  const items = listEl.querySelectorAll('.item:not(.dragging)');
+  let target = null;
+  let closestDist = Infinity;
+
+  items.forEach(item => {
+    const rect = item.getBoundingClientRect();
+    const mid = rect.top + rect.height / 2;
+    const dist = Math.abs(e.clientY - mid);
+    if (dist < closestDist) {
+      closestDist = dist;
+      target = item;
+    }
+    item.classList.remove('drag-over');
+  });
+
+  // Clean up
+  ghost.remove();
+  el.classList.remove('dragging');
+
+  const toId = target?.dataset.id;
+  if (toId && toId !== id) {
+    reorder(id, toId);
+  }
+
+  dragState = null;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
