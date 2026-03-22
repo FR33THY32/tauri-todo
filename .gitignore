@@ -3,6 +3,7 @@ src-tauri/target/
 
 # Build output
 dist/
+frontend/dist/
 
 # Generated schemas
 src-tauri/gen/

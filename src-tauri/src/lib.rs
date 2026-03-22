@@ -6,6 +6,9 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager, State,
 };
+
+#[cfg(desktop)]
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use uuid::Uuid;
 use chrono::Utc;
 
@@ -24,6 +27,13 @@ pub struct Todo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Idea {
+    pub id: String,
+    pub text: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoList {
     pub id: String,
     pub name: String,
@@ -37,6 +47,8 @@ pub struct AppStore {
     #[serde(default = "default_theme")]
     pub theme: String,
     pub lists: Vec<TodoList>,
+    #[serde(default)]
+    pub ideas: Vec<Idea>,
 }
 
 fn default_theme() -> String { "dark".to_string() }
@@ -53,6 +65,7 @@ impl Default for AppStore {
                 name: "Personal".to_string(),
                 todos: Vec::new(),
             }],
+            ideas: Vec::new(),
         }
     }
 }
@@ -65,16 +78,15 @@ struct LegacyStore {
 
 pub struct AppState {
     pub store: Mutex<AppStore>,
-    pub data_path: Mutex<String>,
+    pub data_path: String,
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────────
 
 fn save_store(state: &AppState) -> Result<(), String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    let path = state.data_path.lock().map_err(|e| e.to_string())?;
-    let json = serde_json::to_string_pretty(&*store).map_err(|e| e.to_string())?;
-    fs::write(&*path, json).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string(&*store).map_err(|e| e.to_string())?;
+    fs::write(&state.data_path, json).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -99,6 +111,7 @@ fn load_store(path: &str) -> AppStore {
                 name: "Personal".to_string(),
                 todos: legacy.todos,
             }],
+            ideas: Vec::new(),
         };
     }
 
@@ -119,6 +132,38 @@ where
         .find(|l| l.id == active_id)
         .ok_or("Active list not found")?;
     f(list)
+}
+
+// ── Snapshot Command (single IPC for init/refresh) ──────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AppSnapshot {
+    pub lists: Vec<ListInfo>,
+    pub active_list: String,
+    pub todos: Vec<Todo>,
+    pub ideas: Vec<Idea>,
+    pub theme: String,
+}
+
+#[tauri::command]
+fn get_snapshot(state: State<AppState>) -> Result<AppSnapshot, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let active_id = store.active_list.clone();
+    let todos = store.lists.iter()
+        .find(|l| l.id == active_id)
+        .map(|l| l.todos.clone())
+        .unwrap_or_default();
+    Ok(AppSnapshot {
+        lists: store.lists.iter().map(|l| ListInfo {
+            id: l.id.clone(),
+            name: l.name.clone(),
+            count: l.todos.iter().filter(|t| !t.completed).count(),
+        }).collect(),
+        active_list: active_id,
+        todos,
+        ideas: store.ideas.clone(),
+        theme: store.theme.clone(),
+    })
 }
 
 // ── List Management Commands ────────────────────────────────────────────────
@@ -217,19 +262,37 @@ fn get_todos(state: State<AppState>) -> Result<Vec<Todo>, String> {
 }
 
 #[tauri::command]
-fn add_todo(title: String, state: State<AppState>) -> Result<Todo, String> {
+fn add_todo(
+    title: String,
+    due_date: Option<String>,
+    target_list_id: Option<String>,
+    state: State<AppState>,
+) -> Result<Todo, String> {
     let todo = Todo {
         id: Uuid::new_v4().to_string(),
         title: title.trim().to_string(),
         description: String::new(),
-        due_date: None,
+        due_date,
         completed: false,
         created_at: Utc::now().to_rfc3339(),
     };
-    with_active_list(&state, |list| {
+
+    // If a target list is specified, add to that list instead of the active one
+    if let Some(ref list_id) = target_list_id {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        let list = store
+            .lists
+            .iter_mut()
+            .find(|l| l.id == *list_id)
+            .ok_or("Target list not found")?;
         list.todos.insert(0, todo.clone());
-        Ok(())
-    })?;
+    } else {
+        with_active_list(&state, |list| {
+            list.todos.insert(0, todo.clone());
+            Ok(())
+        })?;
+    }
+
     save_store(&state)?;
     Ok(todo)
 }
@@ -348,6 +411,110 @@ fn set_theme(theme: String, state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+// ── Idea Commands ───────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_ideas(state: State<AppState>) -> Result<Vec<Idea>, String> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    Ok(store.ideas.clone())
+}
+
+#[tauri::command]
+fn add_idea(text: String, state: State<AppState>) -> Result<Idea, String> {
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Idea text cannot be empty".to_string());
+    }
+    let idea = Idea {
+        id: Uuid::new_v4().to_string(),
+        text: trimmed,
+        created_at: Utc::now().to_rfc3339(),
+    };
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        store.ideas.insert(0, idea.clone());
+        // Cap at 500 ideas
+        if store.ideas.len() > 500 {
+            store.ideas.truncate(500);
+        }
+    }
+    save_store(&state)?;
+    Ok(idea)
+}
+
+#[tauri::command]
+fn delete_idea(id: String, state: State<AppState>) -> Result<(), String> {
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        if !store.ideas.iter().any(|i| i.id == id) {
+            return Err("Idea not found".to_string());
+        }
+        store.ideas.retain(|i| i.id != id);
+    }
+    save_store(&state)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn promote_idea(id: String, list_id: Option<String>, state: State<AppState>) -> Result<Todo, String> {
+    let todo;
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+
+        // Validate everything before mutating
+        let idx = store.ideas.iter().position(|i| i.id == id)
+            .ok_or("Idea not found")?;
+        let target_id = list_id.unwrap_or_else(|| store.active_list.clone());
+        if !store.lists.iter().any(|l| l.id == target_id) {
+            return Err("Target list not found".to_string());
+        }
+
+        // Safe to mutate now
+        let idea = store.ideas.remove(idx);
+        todo = Todo {
+            id: Uuid::new_v4().to_string(),
+            title: idea.text,
+            description: String::new(),
+            due_date: None,
+            completed: false,
+            created_at: Utc::now().to_rfc3339(),
+        };
+
+        let list = store.lists.iter_mut()
+            .find(|l| l.id == target_id)
+            .unwrap(); // safe — validated above
+        list.todos.insert(0, todo.clone());
+    }
+    save_store(&state)?;
+    Ok(todo)
+}
+
+#[tauri::command]
+fn restore_idea(idea: Idea, index: usize, state: State<AppState>) -> Result<Vec<Idea>, String> {
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        let idx = index.min(store.ideas.len());
+        store.ideas.insert(idx, idea);
+    }
+    save_store(&state)?;
+    get_ideas(state)
+}
+
+#[tauri::command]
+fn undo_promote(idea: Idea, todo_id: String, list_id: String, state: State<AppState>) -> Result<(), String> {
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        // Remove the promoted todo from target list
+        if let Some(list) = store.lists.iter_mut().find(|l| l.id == list_id) {
+            list.todos.retain(|t| t.id != todo_id);
+        }
+        // Restore the idea at the top
+        store.ideas.insert(0, idea);
+    }
+    save_store(&state)?;
+    Ok(())
+}
+
 // ── App Entry ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -365,7 +532,7 @@ pub fn run() {
 
             app.manage(AppState {
                 store: Mutex::new(store),
-                data_path: Mutex::new(data_path_str),
+                data_path: data_path_str,
             });
 
             // ── System Tray ─────────────────────────────────────────────
@@ -406,9 +573,36 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // ── Global Shortcut (Alt+Space → Quick Capture) ─────────────
+            #[cfg(desktop)]
+            {
+                let shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Space);
+
+                app.handle().plugin(
+                    tauri_plugin_global_shortcut::Builder::new()
+                        .with_handler(move |app, sc, event| {
+                            if sc == &shortcut && event.state() == ShortcutState::Pressed {
+                                if let Some(win) = app.get_webview_window("capture") {
+                                    if win.is_visible().unwrap_or(false) {
+                                        let _ = win.hide();
+                                    } else {
+                                        let _ = win.center();
+                                        let _ = win.show();
+                                        let _ = win.set_focus();
+                                    }
+                                }
+                            }
+                        })
+                        .build(),
+                )?;
+
+                app.global_shortcut().register(shortcut)?;
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            get_snapshot,
             get_todos,
             add_todo,
             toggle_todo,
@@ -427,6 +621,12 @@ pub fn run() {
             delete_list,
             get_theme,
             set_theme,
+            get_ideas,
+            add_idea,
+            delete_idea,
+            promote_idea,
+            restore_idea,
+            undo_promote,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

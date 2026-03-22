@@ -4,13 +4,16 @@
   "version": "1.0.0",
   "identifier": "com.todo.glassy",
   "build": {
-    "frontendDist": "../ui",
-    "devUrl": "http://localhost:1420"
+    "frontendDist": "../frontend/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev --prefix ../frontend",
+    "beforeBuildCommand": "npm run build --prefix ../frontend"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
         "title": "Todo",
         "width": 480,
         "height": 720,
@@ -20,6 +23,22 @@
         "center": true,
         "minWidth": 400,
         "minHeight": 520
+      },
+      {
+        "label": "capture",
+        "title": "Quick Capture",
+        "url": "/capture.html",
+        "width": 520,
+        "height": 72,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "center": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "focus": true,
+        "backgroundColor": "#00000000"
       }
     ],
     "security": {
